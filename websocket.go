@@ -6,11 +6,15 @@ package bitvavo
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/gorilla/websocket"
 	"net/url"
 	"reflect"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -18,6 +22,7 @@ import (
 type Websocket struct {
 	ApiKey    string
 	ApiSecret string
+	AccessWindow int
 
 	WsUrl     string
 	Debugging bool
@@ -85,32 +90,6 @@ type Websocket struct {
 
 }
 
-func (bitvavo Bitvavo) NewWebsocket() (*Websocket, chan MyError) {
-	ws := Websocket{
-		sendBuf: make(chan []byte, 10),
-		Debugging : bitvavo.Debugging,
-		ApiKey : bitvavo.ApiKey,
-		ApiSecret : bitvavo.ApiSecret,
-		WsUrl : bitvavo.WsUrl,
-		reconnectOnError : true,
-		authenticated : false,
-		authenticationFailed : false,
-		keepLocalBook : false,
-	}
-	errChannel := make(chan MyError)
-	ws.errChannel = errChannel
-	ws.ctx, ws.ctxCancel = context.WithCancel(context.Background())
-
-	go ws.listen()
-	go ws.listenWrite()
-	go ws.ping()
-
-	//go bitvavo.handleMessage(&ws)
-	return &ws, errChannel
-}
-
-
-
 func (ws *Websocket) listen() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -129,22 +108,18 @@ func (ws *Websocket) listen() {
 
 				if err != nil {
 					errorToConsole("Cannot read websocket message")
-					fmt.Printf("Close ws")
+					fmt.Printf("Close ws\r\n")
 					ws.closeWs()
-					return
+					for {
+						//first create a new connection
+						if ws.Connect() != nil {
+							break //then reconnect
+						}
+					}
+					ws.reconnect()
+				} else {
+					ws.handleMessage(message)
 				}
-				//if handleError(err) {
-				//	if ws.reconnectOnError {
-				//		err = ws.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-				//		//bitvavo.reconnect(ws)
-				//		return
-				//
-				//	}
-				//	//return
-				//}
-				ws.handleMessage(message)
-
-				//fmt.Printf("websocket msg: %x\n", bytMsg)
 			}
 		}
 	}
@@ -192,8 +167,8 @@ func (ws *Websocket) Stop() {
 
 // Close will send close message and shutdown websocket connection
 func (ws *Websocket) closeWs() {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	//ws.mu.Lock()
+	//defer ws.mu.Unlock()
 	if ws.conn != nil {
 		fmt.Printf("Close websocket\r\n")
 		ws.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
@@ -253,18 +228,16 @@ func (ws *Websocket) Connect() *websocket.Conn {
 				fmt.Printf("<")
 				return nil
 			})
-			//TODO: Authenticate is necessary
 			if ws.ApiKey != "" {
-				errorToConsole("TODO: authenticate here")
-				//now := time.Now()
-				//nanos := now.UnixNano()
-				//millis := nanos / 1000000
-				//timestamp := strconv.FormatInt(millis, 10)
-				////
-				//authenticate := map[string]string{"action": "authenticate", "key": ws.ApiKey, "signature": bitvavo.createSignature(timestamp, "GET", "/websocket", map[string]string{}, ws.ApiSecret), "timestamp": timestamp, "window": strconv.Itoa(bitvavo.AccessWindow)}
-				//myMessage, _ := json.Marshal(authenticate)
-				//ws.DebugToConsole("SENDING: " + string(myMessage))
-				//ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
+				now := time.Now()
+				nanos := now.UnixNano()
+				millis := nanos / 1000000
+				timestamp := strconv.FormatInt(millis, 10)
+				//
+				authenticate := map[string]string{"action": "authenticate", "key": ws.ApiKey, "signature": createSignature(timestamp, "GET", "/websocket", map[string]string{}, ws.ApiSecret), "timestamp": timestamp, "window": strconv.Itoa(ws.AccessWindow)}
+				myMessage, _ := json.Marshal(authenticate)
+				ws.DebugToConsole("SENDING: " + string(myMessage))
+				ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
 			}
 			//fmt.Printf("connected to websocket to %s", ws.WsUrl)
 			ws.conn = wsConn
@@ -936,4 +909,66 @@ func (ws *Websocket) handleMessage(message []byte) {
 		}
 		ws.withdrawalHistoryChannel <- t.Response
 	}
+}
+func (ws *Websocket) reconnect() {
+
+	errorToConsole("Reconnecting")
+	time.Sleep(500 * time.Millisecond)
+	ws.authenticated = false
+	ws.authenticationFailed = false
+	ws.keepLocalBook = false
+	//ws.conn = bitvavo.InitWS()
+
+	//go bitvavo.handleMessage(ws)
+
+	for market := range ws.subscriptionTickerOptionsMap {
+		myMessage, _ := json.Marshal(ws.subscriptionTickerOptionsMap[market])
+		ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
+	}
+	for market := range ws.subscriptionTicker24hOptionsMap {
+		myMessage, _ := json.Marshal(ws.subscriptionTicker24hOptionsMap[market])
+		ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
+	}
+	for market := range ws.subscriptionAccountOptionsMap {
+		myMessage, _ := json.Marshal(ws.subscriptionAccountOptionsMap[market])
+		ws.sendPrivate(myMessage)
+	}
+	for market := range ws.subscriptionTradesOptionsMap {
+		myMessage, _ := json.Marshal(ws.subscriptionTradesOptionsMap[market])
+		ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
+	}
+	for market := range ws.subscriptionCandlesOptionsMap {
+		for interval := range ws.subscriptionCandlesOptionsMap[market] {
+			myMessage, _ := json.Marshal(ws.subscriptionCandlesOptionsMap[market][interval])
+			ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
+		}
+	}
+	for market := range ws.subscriptionBookUpdateOptionsMap {
+		myMessage, _ := json.Marshal(ws.subscriptionBookUpdateOptionsMap[market])
+		ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
+	}
+	for market := range ws.subscriptionBookOptionsFirstMap {
+		ws.keepLocalBook = true
+		myMessage, _ := json.Marshal(ws.subscriptionBookOptionsFirstMap[market])
+		ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
+	}
+	for market := range ws.subscriptionBookOptionsSecondMap {
+		myMessage, _ := json.Marshal(ws.subscriptionBookOptionsSecondMap[market])
+		ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
+	}
+}
+
+func createSignature(timestamp string, method string, url string, body map[string]string, ApiSecret string) string {
+	result := timestamp + method + "/v2" + url
+	if len(body) != 0 {
+		bodyString, err := json.Marshal(body)
+		if err != nil {
+			errorToConsole("Converting map to string went wrong!")
+		}
+		result = result + string(bodyString)
+	}
+	h := hmac.New(sha256.New, []byte(ApiSecret))
+	h.Write([]byte(result))
+	sha := hex.EncodeToString(h.Sum(nil))
+	return sha
 }

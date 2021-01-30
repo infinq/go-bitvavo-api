@@ -2,13 +2,9 @@ package bitvavo
 
 import (
 	"bytes"
-	//"compress/flate"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
+	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/gorilla/websocket"
 	"io/ioutil"
 	"net/http"
 	"reflect"
@@ -486,19 +482,28 @@ type Bitvavo struct {
 	Debugging         bool
 }
 
-func (bitvavo Bitvavo) createSignature(timestamp string, method string, url string, body map[string]string, ApiSecret string) string {
-	result := timestamp + method + "/v2" + url
-	if len(body) != 0 {
-		bodyString, err := json.Marshal(body)
-		if err != nil {
-			errorToConsole("Converting map to string went wrong!")
-		}
-		result = result + string(bodyString)
+func (bitvavo Bitvavo) NewWebsocket() (*Websocket, chan MyError) {
+	ws := Websocket{
+		sendBuf: make(chan []byte, 10),
+		Debugging : bitvavo.Debugging,
+		ApiKey : bitvavo.ApiKey,
+		ApiSecret : bitvavo.ApiSecret,
+		WsUrl : bitvavo.WsUrl,
+		AccessWindow: bitvavo.AccessWindow,
+		reconnectOnError : true,
+		authenticated : false,
+		authenticationFailed : false,
+		keepLocalBook : false,
 	}
-	h := hmac.New(sha256.New, []byte(ApiSecret))
-	h.Write([]byte(result))
-	sha := hex.EncodeToString(h.Sum(nil))
-	return sha
+	errChannel := make(chan MyError)
+	ws.errChannel = errChannel
+	ws.ctx, ws.ctxCancel = context.WithCancel(context.Background())
+
+	go ws.listen()
+	go ws.listenWrite()
+	go ws.ping()
+
+	return &ws, errChannel
 }
 
 func (bitvavo Bitvavo) sendPublic(endpoint string) []byte {
@@ -538,7 +543,7 @@ func (bitvavo Bitvavo) sendPublic(endpoint string) []byte {
 func (bitvavo Bitvavo) sendPrivate(endpoint string, postfix string, body map[string]string, method string) []byte {
 	millis := time.Now().UnixNano() / 1000000
 	timeString := strconv.FormatInt(millis, 10)
-	sig := bitvavo.createSignature(timeString, method, (endpoint + postfix), body, bitvavo.ApiSecret)
+	sig := createSignature(timeString, method, endpoint + postfix, body, bitvavo.ApiSecret)
 	url := bitvavo.RestUrl + endpoint + postfix
 	client := &http.Client{}
 	byteBody := []byte{}
@@ -1065,50 +1070,4 @@ func errorToConsole(message string) {
 	fmt.Println(time.Now().Format("15:04:05") + " ERROR: " + message)
 }
 
-func (bitvavo Bitvavo) reconnect(ws *Websocket) {
-	bitvavo.DebugToConsole("Reconnecting")
-	time.Sleep(500 * time.Millisecond)
-	ws.authenticated = false
-	ws.authenticationFailed = false
-	ws.keepLocalBook = false
-	//ws.conn = bitvavo.InitWS()
-
-	//go bitvavo.handleMessage(ws)
-
-	for market := range ws.subscriptionTickerOptionsMap {
-		myMessage, _ := json.Marshal(ws.subscriptionTickerOptionsMap[market])
-		ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
-	}
-	for market := range ws.subscriptionTicker24hOptionsMap {
-		myMessage, _ := json.Marshal(ws.subscriptionTicker24hOptionsMap[market])
-		ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
-	}
-	for market := range ws.subscriptionAccountOptionsMap {
-		myMessage, _ := json.Marshal(ws.subscriptionAccountOptionsMap[market])
-		ws.sendPrivate(myMessage)
-	}
-	for market := range ws.subscriptionTradesOptionsMap {
-		myMessage, _ := json.Marshal(ws.subscriptionTradesOptionsMap[market])
-		ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
-	}
-	for market := range ws.subscriptionCandlesOptionsMap {
-		for interval := range ws.subscriptionCandlesOptionsMap[market] {
-			myMessage, _ := json.Marshal(ws.subscriptionCandlesOptionsMap[market][interval])
-			ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
-		}
-	}
-	for market := range ws.subscriptionBookUpdateOptionsMap {
-		myMessage, _ := json.Marshal(ws.subscriptionBookUpdateOptionsMap[market])
-		ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
-	}
-	for market := range ws.subscriptionBookOptionsFirstMap {
-		ws.keepLocalBook = true
-		myMessage, _ := json.Marshal(ws.subscriptionBookOptionsFirstMap[market])
-		ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
-	}
-	for market := range ws.subscriptionBookOptionsSecondMap {
-		myMessage, _ := json.Marshal(ws.subscriptionBookOptionsSecondMap[market])
-		ws.conn.WriteMessage(websocket.TextMessage, []byte(myMessage))
-	}
-}
 
