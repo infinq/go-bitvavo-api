@@ -20,8 +20,8 @@ import (
 )
 
 type Websocket struct {
-	ApiKey    string
-	ApiSecret string
+	ApiKey       string
+	ApiSecret    string
 	AccessWindow int
 
 	WsUrl     string
@@ -34,6 +34,8 @@ type Websocket struct {
 	sendBuf   chan []byte
 	ctx       context.Context
 	ctxCancel context.CancelFunc
+
+	lastResponse time.Time
 
 	localBook                LocalBook
 	reconnectOnError         bool
@@ -194,9 +196,22 @@ func (ws *Websocket) ping() {
 			ws.mu.Lock()
 			if err := ws.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(pingPeriod/2)); err != nil {
 				fmt.Printf("/")
-				ws.closeWs()
 			}
 			ws.mu.Unlock()
+			time.Sleep(pingPeriod/2)
+			if time.Now().Sub(ws.lastResponse) > 3 * pingPeriod {
+				fmt.Printf("\\")
+				ws.closeWs()
+				for {
+					//first create a new connection
+					if ws.Connect() != nil {
+						break //then reconnect
+					}
+				}
+				ws.reconnect()
+			}
+
+
 		case <-ws.ctx.Done():
 			return
 		}
@@ -217,15 +232,17 @@ func (ws *Websocket) Connect() *websocket.Conn {
 		case <-ws.ctx.Done():
 			return nil
 		default:
-			fmt.Print("Create connection")
 			uri, _ := url.Parse(ws.WsUrl)
+			fmt.Printf("Create connection: %s", uri.String())
 			wsConn, _, err := websocket.DefaultDialer.Dial(uri.String(), nil)
 			if err != nil {
 				fmt.Printf("X")
 				continue
 			}
+			ws.lastResponse = time.Now()
 			wsConn.SetPongHandler(func(msg string) error {
 				fmt.Printf("<")
+				ws.lastResponse = time.Now()
 				return nil
 			})
 			if ws.ApiKey != "" {
@@ -492,7 +509,7 @@ func (ws *Websocket) WithdrawalHistory(options map[string]string) chan []History
 	return ws.withdrawalHistoryChannel
 }
 
-func (ws *Websocket) SubscriptionTicker(market string) chan SubscriptionTicker {
+func (ws *Websocket) SubscriptionTicker(market string) map[string]chan SubscriptionTicker {
 	options := SubscriptionTickerObject{Action: "subscribe", Channels: []SubscriptionTickAccSubObject{SubscriptionTickAccSubObject{Name: "ticker", Markets: []string{market}}}}
 	if ws.subscriptionTickerChannelMap == nil {
 		ws.subscriptionTickerChannelMap = map[string]chan SubscriptionTicker{}
@@ -505,10 +522,10 @@ func (ws *Websocket) SubscriptionTicker(market string) chan SubscriptionTicker {
 
 	myMessage, _ := json.Marshal(options)
 	ws.Write([]byte(myMessage))
-	return ws.subscriptionTickerChannelMap[market]
+	return ws.subscriptionTickerChannelMap
 }
 
-func (ws *Websocket) SubscriptionTicker24h(market string) chan Ticker24h {
+func (ws *Websocket) SubscriptionTicker24h(market string) map[string]chan Ticker24h {
 	options := SubscriptionTickerObject{Action: "subscribe", Channels: []SubscriptionTickAccSubObject{SubscriptionTickAccSubObject{Name: "ticker24h", Markets: []string{market}}}}
 	if ws.subscriptionTicker24hChannelMap == nil {
 		ws.subscriptionTicker24hChannelMap = map[string]chan Ticker24h{}
@@ -521,7 +538,7 @@ func (ws *Websocket) SubscriptionTicker24h(market string) chan Ticker24h {
 
 	myMessage, _ := json.Marshal(options)
 	ws.Write([]byte(myMessage))
-	return ws.subscriptionTicker24hChannelMap[market]
+	return ws.subscriptionTicker24hChannelMap
 }
 
 func (ws *Websocket) SubscriptionAccount(market string) (chan SubscriptionAccountOrder, chan SubscriptionAccountFill) {
@@ -546,7 +563,7 @@ func (ws *Websocket) SubscriptionAccount(market string) (chan SubscriptionAccoun
 	return ws.subscriptionAccountOrderChannelMap[market], ws.subscriptionAccountFillChannelMap[market]
 }
 
-func (ws *Websocket) SubscriptionCandles(market string, interval string) chan SubscriptionCandles {
+func (ws *Websocket) SubscriptionCandles(market string, interval string) map[string]map[string]chan SubscriptionCandles {
 	options := SubscriptionCandlesObject{Action: "subscribe", Channels: []SubscriptionCandlesSubObject{SubscriptionCandlesSubObject{Name: "candles", Interval: []string{interval}, Markets: []string{market}}}}
 	if ws.subscriptionCandlesChannelMap == nil {
 		ws.subscriptionCandlesChannelMap = map[string]map[string]chan SubscriptionCandles{}
@@ -566,10 +583,10 @@ func (ws *Websocket) SubscriptionCandles(market string, interval string) chan Su
 	myMessage, _ := json.Marshal(options)
 
 	ws.Write([]byte(myMessage))
-	return ws.subscriptionCandlesChannelMap[market][interval]
+	return ws.subscriptionCandlesChannelMap
 }
 
-func (ws *Websocket) SubscriptionTrades(market string) chan SubscriptionTrades {
+func (ws *Websocket) SubscriptionTrades(market string) map[string]chan SubscriptionTrades {
 	options := SubscriptionTradesBookObject{Action: "subscribe", Channels: []SubscriptionTradesBookSubObject{SubscriptionTradesBookSubObject{Name: "trades", Markets: []string{market}}}}
 	if ws.subscriptionTradesChannelMap == nil {
 		ws.subscriptionTradesChannelMap = map[string]chan SubscriptionTrades{}
@@ -582,10 +599,10 @@ func (ws *Websocket) SubscriptionTrades(market string) chan SubscriptionTrades {
 
 	myMessage, _ := json.Marshal(options)
 	ws.Write([]byte(myMessage))
-	return ws.subscriptionTradesChannelMap[market]
+	return ws.subscriptionTradesChannelMap
 }
 
-func (ws *Websocket) SubscriptionBookUpdate(market string) chan SubscriptionBookUpdate {
+func (ws *Websocket) SubscriptionBookUpdate(market string) map[string]chan SubscriptionBookUpdate {
 	options := SubscriptionTradesBookObject{Action: "subscribe", Channels: []SubscriptionTradesBookSubObject{SubscriptionTradesBookSubObject{Name: "book", Markets: []string{market}}}}
 	if ws.subscriptionBookUpdateChannelMap == nil {
 		ws.subscriptionBookUpdateChannelMap = map[string]chan SubscriptionBookUpdate{}
@@ -597,10 +614,10 @@ func (ws *Websocket) SubscriptionBookUpdate(market string) chan SubscriptionBook
 	ws.subscriptionBookUpdateOptionsMap[market] = options
 	myMessage, _ := json.Marshal(options)
 	ws.Write([]byte(myMessage))
-	return ws.subscriptionBookUpdateChannelMap[market]
+	return ws.subscriptionBookUpdateChannelMap
 }
 
-func (ws *Websocket) SubscriptionBook(market string, options map[string]string) chan Book {
+func (ws *Websocket) SubscriptionBook(market string, options map[string]string) map[string]chan Book {
 	ws.keepLocalBook = true
 	options["action"] = "getBook"
 	options["market"] = market
@@ -626,7 +643,7 @@ func (ws *Websocket) SubscriptionBook(market string, options map[string]string) 
 	ws.Write([]byte(myMessage))
 	mySecondMessage, _ := json.Marshal(secondOptions)
 	ws.Write([]byte(mySecondMessage))
-	return ws.subscriptionBookChannelMap[market]
+	return ws.subscriptionBookChannelMap
 }
 
 //TODO add error to return
@@ -660,7 +677,7 @@ func (ws *Websocket) handleMessage(message []byte) {
 		if handleError(err) {
 			return
 		}
-		fmt.Printf(".")
+		//fmt.Printf(".")
 		market, _ := x["market"].(string)
 		if ws.subscriptionBookUpdateChannelMap[market] != nil {
 			ws.subscriptionBookUpdateChannelMap[market] <- t
@@ -674,7 +691,7 @@ func (ws *Websocket) handleMessage(message []byte) {
 		if handleError(err) {
 			return
 		}
-		fmt.Printf("+")
+		//fmt.Printf("+")
 		market, _ := x["market"].(string)
 		if ws.subscriptionTradesChannelMap[market] != nil {
 			ws.subscriptionTradesChannelMap[market] <- t
@@ -723,7 +740,7 @@ func (ws *Websocket) handleMessage(message []byte) {
 		if err != nil {
 			return
 		}
-		fmt.Printf("=")
+		//fmt.Printf("=")
 		var candles []Candle
 		for i := 0; i < len(t.Candle); i++ {
 			entry := reflect.ValueOf(t.Candle[i])

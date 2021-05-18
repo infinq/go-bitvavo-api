@@ -616,7 +616,7 @@ func (bitvavo Bitvavo) GetRemainingLimit() int {
 func (bitvavo Bitvavo) createPostfix(options map[string]string) string {
 	result := []string{}
 	for k := range options {
-		result = append(result, (k + "=" + options[k]))
+		result = append(result, k + "=" + options[k])
 	}
 	params := strings.Join(result, "&")
 	if len(params) != 0 {
